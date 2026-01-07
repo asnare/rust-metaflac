@@ -7,6 +7,8 @@ use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::iter::repeat;
 
+const MAX_METADATA_BLOCK_LEN: u32 = 1 << 24;
+
 // BlockType {{{
 /// Types of blocks. Used primarily to map blocks to block identifiers when reading and writing.
 #[allow(missing_docs)]
@@ -131,6 +133,13 @@ impl Block {
             }
             Block::Unknown((_, ref bytes)) => (bytes.len() as u32, Some(bytes.clone())),
         };
+
+        if MAX_METADATA_BLOCK_LEN <= content_len {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "metadata block size exceeds 24-bit length limit (16 MiB)",
+            ));
+        }
 
         let mut byte: u8 = 0;
         if is_last {
@@ -1260,5 +1269,24 @@ pub(crate) fn read_ident<R: Read>(mut reader: R) -> Result<()> {
             ErrorKind::InvalidInput,
             "reader does not contain flac metadata",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn write_rejects_oversized_metadata_block() {
+        // Metadata blocks must be less than 16 MiB in size.
+        let too_big_block = Block::Padding(16 * 1024 * 1024);
+        let mut writer = Cursor::new(Vec::new());
+        let err = too_big_block.write_to(false, &mut writer).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidInput));
+        assert_eq!(
+            err.description,
+            "metadata block size exceeds 24-bit length limit (16 MiB)"
+        );
     }
 }
