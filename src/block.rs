@@ -5,7 +5,6 @@ use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::{Read, Write};
-use std::iter::repeat;
 
 // BlockType {{{
 /// Types of blocks. Used primarily to map blocks to block identifiers when reading and writing.
@@ -534,8 +533,7 @@ impl CueSheet {
 
         bytes.extend(self.catalog_num.clone().into_bytes());
         bytes.extend(
-            repeat(0)
-                .take(128 - self.catalog_num.len())
+            std::iter::repeat_n(0, 128 - self.catalog_num.len())
                 .collect::<Vec<u8>>(),
         );
         bytes.extend(self.num_leadin.to_be_bytes().iter());
@@ -557,8 +555,7 @@ impl CueSheet {
             bytes.push(track.number);
             bytes.extend(track.isrc.clone().into_bytes().into_iter());
             bytes.extend(
-                repeat(0)
-                    .take(12 - track.isrc.len())
+                std::iter::repeat_n(0, 12 - track.isrc.len())
                     .collect::<Vec<u8>>()
                     .into_iter(),
             );
