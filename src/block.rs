@@ -1,8 +1,11 @@
 use crate::error::{Error, ErrorKind, Result};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
+#[cfg(feature = "preserve_order")]
+use indexmap::{map::Entry, IndexMap as Map};
 
-use std::collections::{hash_map::Entry, HashMap};
+#[cfg(not(feature = "preserve_order"))]
+use std::collections::{hash_map::Entry, HashMap as Map};
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::iter::repeat;
@@ -896,7 +899,7 @@ pub struct VorbisComment {
     /// The vendor string.
     pub vendor_string: String,
     /// A map of keys to a list of their values.
-    pub comments: HashMap<String, Vec<String>>,
+    pub comments: Map<String, Vec<String>>,
 }
 
 impl VorbisComment {
@@ -904,7 +907,7 @@ impl VorbisComment {
     pub fn new() -> VorbisComment {
         VorbisComment {
             vendor_string: String::new(),
-            comments: HashMap::new(),
+            comments: Map::new(),
         }
     }
 
@@ -989,6 +992,9 @@ impl VorbisComment {
 
     /// Removes the comments for the specified key.
     pub fn remove(&mut self, key: &str) {
+        #[cfg(feature = "preserve_order")]
+        self.comments.shift_remove(key);
+        #[cfg(not(feature = "preserve_order"))]
         self.comments.remove(key);
     }
 
@@ -998,6 +1004,9 @@ impl VorbisComment {
             let values = entry.get_mut();
             values.retain(|s| &s[..] != value);
             if values.is_empty() {
+                #[cfg(feature = "preserve_order")]
+                entry.shift_remove();
+                #[cfg(not(feature = "preserve_order"))]
                 entry.remove();
             }
         }
@@ -1261,6 +1270,8 @@ pub(crate) fn read_ident<R: Read>(mut reader: R) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "preserve_order", feature = "serde"))]
+    use serde_json::{json, Value};
 
     fn example_vorbis_comment() -> VorbisComment {
         let mut vc = VorbisComment::new();
@@ -1284,6 +1295,26 @@ mod tests {
         assert_eq!(vc, decoded);
     }
 
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_preserve_order() {
+        let mut vorbis = VorbisComment::new();
+
+        // Iteration order should match insertion order; overwrites retain the prior position.
+        vorbis.set("D_KEY", vec!["first"]);
+        vorbis.set("C_KEY", vec!["will_be_updated"]);
+        vorbis.set("B_KEY", vec!["third", "fourth"]);
+        vorbis.set("A_KEY", vec!["last"]);
+        vorbis.set("C_KEY", vec!["second"]);
+
+        let encoded = vorbis.to_bytes();
+        let decoded = VorbisComment::from_bytes(&encoded).unwrap();
+
+        assert_eq!(vorbis, decoded);
+        let decoded_keys: Vec<&str> = decoded.comments.keys().map(String::as_str).collect();
+        assert_eq!(vec!["D_KEY", "C_KEY", "B_KEY", "A_KEY"], decoded_keys);
+    }
+
     #[test]
     fn vorbis_comment_remove_pair() {
         let mut vc = example_vorbis_comment();
@@ -1304,6 +1335,24 @@ mod tests {
         assert_eq!(vc.genre().unwrap(), &vec!["Pop".to_string()]);
     }
 
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_remove_pair_preserve_order() {
+        let mut vc = VorbisComment::new();
+        vc.set("A", vec!["1"]);
+        vc.set("B", vec!["2"]);
+        vc.set("C", vec!["3", "4"]);
+        vc.set("D", vec!["5"]);
+
+        vc.remove_pair("A", "no_effect");
+        vc.remove_pair("B", "2");
+        vc.remove_pair("C", "4");
+
+        let remaining_keys: Vec<&str> = vc.comments.keys().map(String::as_str).collect();
+        assert_eq!(remaining_keys, vec!["A", "C", "D"]);
+        assert_eq!(vc.get("C"), Some(&vec!["3".to_string()]));
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn vorbis_comment_serde_round_trip() {
@@ -1311,5 +1360,46 @@ mod tests {
         let encoded = serde_json::to_string(&vc).unwrap();
         let decoded: VorbisComment = serde_json::from_str(&encoded).unwrap();
         assert_eq!(vc, decoded);
+    }
+
+    #[cfg(all(feature = "preserve_order", feature = "serde"))]
+    #[test]
+    fn vorbis_comment_serde_preserve_order() {
+        let expected_json = json!({
+            "vendor_string": "sprocketeer",
+            "comments": {
+                "KEY_4":  ["first"],
+                "KEY_3":  ["second"],
+                "KEY_2":  ["third", "fourth"],
+                "KEY_1":  ["fifth"],
+                "KEY_0":  ["last"],
+            },
+        });
+        let mut vc = VorbisComment::new();
+        vc.vendor_string = "sprocketeer".to_string();
+        // Deliberately not sorted lexigraphically, and with a replacement.
+        vc.set("KEY_4", vec!["first"]);
+        vc.set("KEY_3", vec!["replaced"]);
+        vc.set("KEY_2", vec!["third", "fourth"]);
+        vc.set("KEY_1", vec!["fifth"]);
+        vc.set("KEY_0", vec!["last"]);
+        vc.set("KEY_3", vec!["second"]);
+
+        let encoded = serde_json::to_string(&vc).unwrap();
+
+        // Check ordering is preserved when directly decoding.
+        let decoded_vc: VorbisComment = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(vc, decoded_vc);
+
+        // Check the ordering is preserved when decoding as JSON.
+        let decoded_json: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded_json, expected_json);
+        let tag_keys: Vec<&str> = decoded_json["comments"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(tag_keys, vec!["KEY_4", "KEY_3", "KEY_2", "KEY_1", "KEY_0"]);
     }
 }
