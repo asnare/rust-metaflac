@@ -532,10 +532,7 @@ impl CueSheet {
         assert!(self.catalog_num.len() <= 128);
 
         bytes.extend(self.catalog_num.clone().into_bytes());
-        bytes.extend(
-            std::iter::repeat_n(0, 128 - self.catalog_num.len())
-                .collect::<Vec<u8>>(),
-        );
+        bytes.extend(std::iter::repeat_n(0, 128 - self.catalog_num.len()).collect::<Vec<u8>>());
         bytes.extend(self.num_leadin.to_be_bytes().iter());
 
         let mut flags = 0;
