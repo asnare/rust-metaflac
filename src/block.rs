@@ -2,7 +2,7 @@ use crate::error::{Error, ErrorKind, Result};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::iter::repeat;
@@ -995,16 +995,12 @@ impl VorbisComment {
 
     /// Removes any matching key/value pairs.
     pub fn remove_pair(&mut self, key: &str, value: &str) {
-        if let Some(list) = self.comments.get_mut(key) {
-            list.retain(|s| &s[..] != value);
-        }
-
-        let mut num_values = 0;
-        if let Some(values) = self.get(key) {
-            num_values = values.len();
-        }
-        if num_values == 0 {
-            self.remove(key)
+        if let Entry::Occupied(mut entry) = self.comments.entry(key.to_string()) {
+            let values = entry.get_mut();
+            values.retain(|s| &s[..] != value);
+            if values.is_empty() {
+                entry.remove();
+            }
         }
     }
 
