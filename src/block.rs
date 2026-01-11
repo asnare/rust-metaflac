@@ -1262,3 +1262,59 @@ pub(crate) fn read_ident<R: Read>(mut reader: R) -> Result<()> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_vorbis_comment() -> VorbisComment {
+        let mut vc = VorbisComment::new();
+        vc.set_title(vec!["Track Title"]);
+        vc.set_artist(vec!["The Artist"]);
+        vc.set("ARTISTSORT", vec!["Artist, The"]);
+        vc.set_album(vec!["Test Album"]);
+        vc.set_album_artist(vec!["Album Artist"]);
+        vc.set_track(2);
+        vc.set_total_tracks(10);
+        vc.set_genre(vec!["Rock", "Pop"]);
+        vc.set_lyrics(vec!["Lyrics"]);
+        vc
+    }
+
+    #[test]
+    fn vorbis_comment_encoding_round_trip() {
+        let vc = example_vorbis_comment();
+        let encoded = vc.to_bytes();
+        let decoded = VorbisComment::from_bytes(&encoded).unwrap();
+        assert_eq!(vc, decoded);
+    }
+
+    #[test]
+    fn vorbis_comment_remove_pair() {
+        let mut vc = example_vorbis_comment();
+        assert_eq!(vc.track(), Some(2));
+        assert_eq!(vc.total_tracks(), Some(10));
+        assert_eq!(
+            vc.genre().unwrap(),
+            &vec!["Rock".to_string(), "Pop".to_string()]
+        );
+
+        vc.remove_pair("TRACKNUMBER", "5"); // No effect.
+        vc.remove_pair("TOTALTRACKS", "10"); // No more tag at all.
+        vc.remove_pair("GENRE", "Rock"); // Remove one (but not all) of the values.
+
+        assert_eq!(vc.track(), Some(2));
+        assert_eq!(vc.total_tracks(), None);
+        assert!(!vc.comments.contains_key("TOTALTRACKS"));
+        assert_eq!(vc.genre().unwrap(), &vec!["Pop".to_string()]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn vorbis_comment_serde_round_trip() {
+        let vc = example_vorbis_comment();
+        let encoded = serde_json::to_string(&vc).unwrap();
+        let decoded: VorbisComment = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(vc, decoded);
+    }
+}
