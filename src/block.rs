@@ -998,6 +998,15 @@ impl VorbisComment {
         self.comments.remove(key);
     }
 
+    fn remove_keys(&mut self, keys: &[&str]) {
+        #[cfg(feature = "preserve_order")]
+        self.comments.retain(|k, _| !keys.contains(&k.as_str()));
+        #[cfg(not(feature = "preserve_order"))]
+        for key in keys {
+            self.remove(key);
+        }
+    }
+
     /// Removes any matching key/value pairs.
     pub fn remove_pair(&mut self, key: &str, value: &str) {
         if let Entry::Occupied(mut entry) = self.comments.entry(key.to_string()) {
@@ -1028,8 +1037,7 @@ impl VorbisComment {
     /// Removes all values with the ARTIST key. This will result in any ARTISTSORT comments being
     /// removed as well.
     pub fn remove_artist(&mut self) {
-        self.remove("ARTISTSORT");
-        self.remove("ARTIST");
+        self.remove_keys(&["ARTISTSORT", "ARTIST"]);
     }
 
     /// Returns a reference to the vector of values with the ALBUM key.
@@ -1047,8 +1055,7 @@ impl VorbisComment {
     /// Removes all values with the ALBUM key. This will result in any ALBUMSORT comments being
     /// removed as well.
     pub fn remove_album(&mut self) {
-        self.remove("ALBUMSORT");
-        self.remove("ALBUM");
+        self.remove_keys(&["ALBUMSORT", "ALBUM"]);
     }
 
     /// Returns a reference to the vector of values with the GENRE key.
@@ -1081,8 +1088,7 @@ impl VorbisComment {
     /// Removes all values with the TITLE key. This will result in any TITLESORT comments being
     /// removed as well.
     pub fn remove_title(&mut self) {
-        self.remove("TITLESORT");
-        self.remove("TITLE");
+        self.remove_keys(&["TITLESORT", "TITLE"]);
     }
 
     /// Attempts to convert the first TRACKNUMBER comment to a `u32`.
@@ -1142,8 +1148,7 @@ impl VorbisComment {
     /// Removes all values with the ALBUMARTIST key. This will result in any ALBUMARTISTSORT
     /// comments being removed as well.
     pub fn remove_album_artist(&mut self) {
-        self.remove("ALBUMARTISTSORT");
-        self.remove("ALBUMARTIST");
+        self.remove_keys(&["ALBUMARTISTSORT", "ALBUMARTIST"]);
     }
 
     /// Returns a reference to the vector of values with the LYRICS key.
@@ -1313,6 +1318,37 @@ mod tests {
         assert_eq!(vorbis, decoded);
         let decoded_keys: Vec<&str> = decoded.comments.keys().map(String::as_str).collect();
         assert_eq!(vec!["D_KEY", "C_KEY", "B_KEY", "A_KEY"], decoded_keys);
+    }
+
+    #[test]
+    fn vorbis_comment_remove_keys() {
+        let mut vc = example_vorbis_comment();
+        assert!(vc.comments.contains_key("ARTIST"));
+        assert!(vc.comments.contains_key("ARTISTSORT"));
+        assert!(vc.comments.contains_key("ALBUM"));
+        assert!(!vc.comments.contains_key("ALBUMSORT"));
+
+        vc.remove_keys(&["ARTISTSORT", "ARTIST"]);
+        vc.remove_keys(&["ALBUMSORT", "ALBUM"]);
+
+        assert!(!vc.comments.contains_key("ARTIST"));
+        assert!(!vc.comments.contains_key("ARTISTSORT"));
+        assert!(!vc.comments.contains_key("ALBUM"));
+    }
+
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_remove_keys_preserve_order() {
+        let mut vc = VorbisComment::new();
+        vc.set("A", vec!["1"]);
+        vc.set("B", vec!["2"]);
+        vc.set("C", vec!["3"]);
+        vc.set("D", vec!["4"]);
+
+        vc.remove_keys(&["B", "D"]);
+
+        let remaining_keys: Vec<&str> = vc.comments.keys().map(String::as_str).collect();
+        assert_eq!(remaining_keys, vec!["A", "C"]);
     }
 
     #[test]
