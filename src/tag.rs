@@ -188,9 +188,7 @@ impl<'a> Tag {
     /// assert!(tag.get_vorbis(&key).is_none());
     /// ```
     pub fn remove_vorbis(&mut self, key: &str) {
-        self.vorbis_comments_mut()
-            .comments
-            .remove(&key.to_ascii_uppercase());
+        self.vorbis_comments_mut().remove(&key.to_ascii_uppercase());
     }
 
     /// Removes the vorbis comments with the specified key and value.

@@ -32,7 +32,9 @@ jobs:
       - name: clippy check
         run: |
           cargo clippy --no-deps --all-targets -- -D warnings
+          cargo clippy --no-deps --all-targets --features=preserve_order -- -D warnings
           cargo clippy --no-deps --all-targets --features=serde -- -D warnings
+          cargo clippy --no-deps --all-targets --features=preserve_order,serde -- -D warnings
 
   docs:
     name: docs
@@ -45,7 +47,9 @@ jobs:
       - name: docs check
         run: |
           cargo doc --no-deps
+          cargo doc --no-deps --features=preserve_order
           cargo doc --no-deps --features=serde
+          cargo doc --no-deps --features=preserve_order,serde
 
   test:
     name: test
@@ -58,4 +62,6 @@ jobs:
       - name: run tests
         run: |
           cargo test
+          cargo test --features=preserve_order
           cargo test --features=serde
+          cargo test --features=preserve_order,serde

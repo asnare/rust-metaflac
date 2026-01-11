@@ -1,10 +1,15 @@
 use crate::error::{Error, ErrorKind, Result};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
+#[cfg(feature = "preserve_order")]
+use indexmap::{map::Entry, IndexMap as Map};
 
-use std::collections::HashMap;
+#[cfg(not(feature = "preserve_order"))]
+use std::collections::{hash_map::Entry, HashMap as Map};
 use std::convert::TryInto;
 use std::io::{Read, Write};
+
+const MAX_METADATA_BLOCK_LEN: u32 = 1 << 24;
 
 // BlockType {{{
 /// Types of blocks. Used primarily to map blocks to block identifiers when reading and writing.
@@ -130,6 +135,13 @@ impl Block {
             }
             Block::Unknown((_, ref bytes)) => (bytes.len() as u32, Some(bytes.clone())),
         };
+
+        if MAX_METADATA_BLOCK_LEN <= content_len {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "metadata block size exceeds 24-bit length limit (16 MiB)",
+            ));
+        }
 
         let mut byte: u8 = 0;
         if is_last {
@@ -532,10 +544,7 @@ impl CueSheet {
         assert!(self.catalog_num.len() <= 128);
 
         bytes.extend(self.catalog_num.clone().into_bytes());
-        bytes.extend(
-            std::iter::repeat_n(0, 128 - self.catalog_num.len())
-                .collect::<Vec<u8>>(),
-        );
+        bytes.extend(std::iter::repeat_n(0, 128 - self.catalog_num.len()).collect::<Vec<u8>>());
         bytes.extend(self.num_leadin.to_be_bytes().iter());
 
         let mut flags = 0;
@@ -893,7 +902,7 @@ pub struct VorbisComment {
     /// The vendor string.
     pub vendor_string: String,
     /// A map of keys to a list of their values.
-    pub comments: HashMap<String, Vec<String>>,
+    pub comments: Map<String, Vec<String>>,
 }
 
 impl VorbisComment {
@@ -901,7 +910,7 @@ impl VorbisComment {
     pub fn new() -> VorbisComment {
         VorbisComment {
             vendor_string: String::new(),
-            comments: HashMap::new(),
+            comments: Map::new(),
         }
     }
 
@@ -979,29 +988,39 @@ impl VorbisComment {
 
     /// Sets the comments for the specified key. Any previous values under the key will be removed.
     pub fn set<K: Into<String>, V: Into<String>>(&mut self, key: K, values: Vec<V>) {
-        let key_owned = key.into();
-        self.remove(&key_owned[..]);
-        self.comments
-            .insert(key_owned, values.into_iter().map(|s| s.into()).collect());
+        let key = key.into();
+        let values = values.into_iter().map(V::into).collect();
+        self.comments.insert(key, values);
     }
 
     /// Removes the comments for the specified key.
     pub fn remove(&mut self, key: &str) {
+        #[cfg(feature = "preserve_order")]
+        self.comments.shift_remove(key);
+        #[cfg(not(feature = "preserve_order"))]
         self.comments.remove(key);
+    }
+
+    fn remove_keys(&mut self, keys: &[&str]) {
+        #[cfg(feature = "preserve_order")]
+        self.comments.retain(|k, _| !keys.contains(&k.as_str()));
+        #[cfg(not(feature = "preserve_order"))]
+        for key in keys {
+            self.remove(key);
+        }
     }
 
     /// Removes any matching key/value pairs.
     pub fn remove_pair(&mut self, key: &str, value: &str) {
-        if let Some(list) = self.comments.get_mut(key) {
-            list.retain(|s| &s[..] != value);
-        }
-
-        let mut num_values = 0;
-        if let Some(values) = self.get(key) {
-            num_values = values.len();
-        }
-        if num_values == 0 {
-            self.remove(key)
+        if let Entry::Occupied(mut entry) = self.comments.entry(key.to_string()) {
+            let values = entry.get_mut();
+            values.retain(|s| &s[..] != value);
+            if values.is_empty() {
+                #[cfg(feature = "preserve_order")]
+                entry.shift_remove();
+                #[cfg(not(feature = "preserve_order"))]
+                entry.remove();
+            }
         }
     }
 
@@ -1021,8 +1040,7 @@ impl VorbisComment {
     /// Removes all values with the ARTIST key. This will result in any ARTISTSORT comments being
     /// removed as well.
     pub fn remove_artist(&mut self) {
-        self.remove("ARTISTSORT");
-        self.remove("ARTIST");
+        self.remove_keys(&["ARTISTSORT", "ARTIST"]);
     }
 
     /// Returns a reference to the vector of values with the ALBUM key.
@@ -1040,8 +1058,7 @@ impl VorbisComment {
     /// Removes all values with the ALBUM key. This will result in any ALBUMSORT comments being
     /// removed as well.
     pub fn remove_album(&mut self) {
-        self.remove("ALBUMSORT");
-        self.remove("ALBUM");
+        self.remove_keys(&["ALBUMSORT", "ALBUM"]);
     }
 
     /// Returns a reference to the vector of values with the GENRE key.
@@ -1074,8 +1091,7 @@ impl VorbisComment {
     /// Removes all values with the TITLE key. This will result in any TITLESORT comments being
     /// removed as well.
     pub fn remove_title(&mut self) {
-        self.remove("TITLESORT");
-        self.remove("TITLE");
+        self.remove_keys(&["TITLESORT", "TITLE"]);
     }
 
     /// Attempts to convert the first TRACKNUMBER comment to a `u32`.
@@ -1135,8 +1151,7 @@ impl VorbisComment {
     /// Removes all values with the ALBUMARTIST key. This will result in any ALBUMARTISTSORT
     /// comments being removed as well.
     pub fn remove_album_artist(&mut self) {
-        self.remove("ALBUMARTISTSORT");
-        self.remove("ALBUMARTIST");
+        self.remove_keys(&["ALBUMARTISTSORT", "ALBUMARTIST"]);
     }
 
     /// Returns a reference to the vector of values with the LYRICS key.
@@ -1257,5 +1272,188 @@ pub(crate) fn read_ident<R: Read>(mut reader: R) -> Result<()> {
             ErrorKind::InvalidInput,
             "reader does not contain flac metadata",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(all(feature = "preserve_order", feature = "serde"))]
+    use serde_json::{json, Value};
+
+    use std::io::Cursor;
+
+    #[test]
+    fn write_rejects_oversized_metadata_block() {
+        // Metadata blocks must be less than 16 MiB in size.
+        let too_big_block = Block::Padding(16 * 1024 * 1024);
+        let mut writer = Cursor::new(Vec::new());
+        let err = too_big_block.write_to(false, &mut writer).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidInput));
+        assert_eq!(
+            err.description,
+            "metadata block size exceeds 24-bit length limit (16 MiB)"
+        );
+    }
+
+    fn example_vorbis_comment() -> VorbisComment {
+        let mut vc = VorbisComment::new();
+        vc.set_title(vec!["Track Title"]);
+        vc.set_artist(vec!["The Artist"]);
+        vc.set("ARTISTSORT", vec!["Artist, The"]);
+        vc.set_album(vec!["Test Album"]);
+        vc.set_album_artist(vec!["Album Artist"]);
+        vc.set_track(2);
+        vc.set_total_tracks(10);
+        vc.set_genre(vec!["Rock", "Pop"]);
+        vc.set_lyrics(vec!["Lyrics"]);
+        vc
+    }
+
+    #[test]
+    fn vorbis_comment_encoding_round_trip() {
+        let vc = example_vorbis_comment();
+        let encoded = vc.to_bytes();
+        let decoded = VorbisComment::from_bytes(&encoded).unwrap();
+        assert_eq!(vc, decoded);
+    }
+
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_preserve_order() {
+        let mut vorbis = VorbisComment::new();
+
+        // Iteration order should match insertion order; overwrites retain the prior position.
+        vorbis.set("D_KEY", vec!["first"]);
+        vorbis.set("C_KEY", vec!["will_be_updated"]);
+        vorbis.set("B_KEY", vec!["third", "fourth"]);
+        vorbis.set("A_KEY", vec!["last"]);
+        vorbis.set("C_KEY", vec!["second"]);
+
+        let encoded = vorbis.to_bytes();
+        let decoded = VorbisComment::from_bytes(&encoded).unwrap();
+
+        assert_eq!(vorbis, decoded);
+        let decoded_keys: Vec<&str> = decoded.comments.keys().map(String::as_str).collect();
+        assert_eq!(vec!["D_KEY", "C_KEY", "B_KEY", "A_KEY"], decoded_keys);
+    }
+
+    #[test]
+    fn vorbis_comment_remove_keys() {
+        let mut vc = example_vorbis_comment();
+        assert!(vc.comments.contains_key("ARTIST"));
+        assert!(vc.comments.contains_key("ARTISTSORT"));
+        assert!(vc.comments.contains_key("ALBUM"));
+        assert!(!vc.comments.contains_key("ALBUMSORT"));
+
+        vc.remove_keys(&["ARTISTSORT", "ARTIST"]);
+        vc.remove_keys(&["ALBUMSORT", "ALBUM"]);
+
+        assert!(!vc.comments.contains_key("ARTIST"));
+        assert!(!vc.comments.contains_key("ARTISTSORT"));
+        assert!(!vc.comments.contains_key("ALBUM"));
+    }
+
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_remove_keys_preserve_order() {
+        let mut vc = VorbisComment::new();
+        vc.set("A", vec!["1"]);
+        vc.set("B", vec!["2"]);
+        vc.set("C", vec!["3"]);
+        vc.set("D", vec!["4"]);
+
+        vc.remove_keys(&["B", "D"]);
+
+        let remaining_keys: Vec<&str> = vc.comments.keys().map(String::as_str).collect();
+        assert_eq!(remaining_keys, vec!["A", "C"]);
+    }
+
+    #[test]
+    fn vorbis_comment_remove_pair() {
+        let mut vc = example_vorbis_comment();
+        assert_eq!(vc.track(), Some(2));
+        assert_eq!(vc.total_tracks(), Some(10));
+        assert_eq!(
+            vc.genre().unwrap(),
+            &vec!["Rock".to_string(), "Pop".to_string()]
+        );
+
+        vc.remove_pair("TRACKNUMBER", "5"); // No effect.
+        vc.remove_pair("TOTALTRACKS", "10"); // No more tag at all.
+        vc.remove_pair("GENRE", "Rock"); // Remove one (but not all) of the values.
+
+        assert_eq!(vc.track(), Some(2));
+        assert_eq!(vc.total_tracks(), None);
+        assert!(!vc.comments.contains_key("TOTALTRACKS"));
+        assert_eq!(vc.genre().unwrap(), &vec!["Pop".to_string()]);
+    }
+
+    #[cfg(feature = "preserve_order")]
+    #[test]
+    fn vorbis_comment_remove_pair_preserve_order() {
+        let mut vc = VorbisComment::new();
+        vc.set("A", vec!["1"]);
+        vc.set("B", vec!["2"]);
+        vc.set("C", vec!["3", "4"]);
+        vc.set("D", vec!["5"]);
+
+        vc.remove_pair("A", "no_effect");
+        vc.remove_pair("B", "2");
+        vc.remove_pair("C", "4");
+
+        let remaining_keys: Vec<&str> = vc.comments.keys().map(String::as_str).collect();
+        assert_eq!(remaining_keys, vec!["A", "C", "D"]);
+        assert_eq!(vc.get("C"), Some(&vec!["3".to_string()]));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn vorbis_comment_serde_round_trip() {
+        let vc = example_vorbis_comment();
+        let encoded = serde_json::to_string(&vc).unwrap();
+        let decoded: VorbisComment = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(vc, decoded);
+    }
+
+    #[cfg(all(feature = "preserve_order", feature = "serde"))]
+    #[test]
+    fn vorbis_comment_serde_preserve_order() {
+        let expected_json = json!({
+            "vendor_string": "sprocketeer",
+            "comments": {
+                "KEY_4":  ["first"],
+                "KEY_3":  ["second"],
+                "KEY_2":  ["third", "fourth"],
+                "KEY_1":  ["fifth"],
+                "KEY_0":  ["last"],
+            },
+        });
+        let mut vc = VorbisComment::new();
+        vc.vendor_string = "sprocketeer".to_string();
+        // Deliberately not sorted lexigraphically, and with a replacement.
+        vc.set("KEY_4", vec!["first"]);
+        vc.set("KEY_3", vec!["replaced"]);
+        vc.set("KEY_2", vec!["third", "fourth"]);
+        vc.set("KEY_1", vec!["fifth"]);
+        vc.set("KEY_0", vec!["last"]);
+        vc.set("KEY_3", vec!["second"]);
+
+        let encoded = serde_json::to_string(&vc).unwrap();
+
+        // Check ordering is preserved when directly decoding.
+        let decoded_vc: VorbisComment = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(vc, decoded_vc);
+
+        // Check the ordering is preserved when decoding as JSON.
+        let decoded_json: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded_json, expected_json);
+        let tag_keys: Vec<&str> = decoded_json["comments"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(tag_keys, vec!["KEY_4", "KEY_3", "KEY_2", "KEY_1", "KEY_0"]);
     }
 }
