@@ -982,10 +982,9 @@ impl VorbisComment {
 
     /// Sets the comments for the specified key. Any previous values under the key will be removed.
     pub fn set<K: Into<String>, V: Into<String>>(&mut self, key: K, values: Vec<V>) {
-        let key_owned = key.into();
-        self.remove(&key_owned[..]);
-        self.comments
-            .insert(key_owned, values.into_iter().map(|s| s.into()).collect());
+        let key = key.into();
+        let values = values.into_iter().map(V::into).collect();
+        self.comments.insert(key, values);
     }
 
     /// Removes the comments for the specified key.
